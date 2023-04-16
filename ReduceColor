@@ -6,10 +6,10 @@
 #include <utility>
 #include <unistd.h>
 #include <algorithm>
+#include <cmath>
 
-////aaaaaa
 #define COLOR_NUM 1000
-#define TABU_TIME 3
+#define TABU_TIME 7
 
 using namespace std;
 
@@ -20,15 +20,17 @@ bool swap_clique_color();
 void color_graph();
 void init_color();
 long choose_conflict_node();
+void swap_two_color(long color1, long color2);
+
 
 vector<vector<long>> adjacency_list;
 vector<vector<long>> temp_adjacency_list;
 vector<vector<long>> color_choice;
 vector<long> tabu;
+vector<vector<long>> tabu_c;
 long current_iter = 0;
 long no_impr = 0;
-long max_iter = 500000000000;
-long big_pert_num = 0;
+long big_pert_node_num = 0;
 
 vector<bool> indicator; // set it false after using
 vector<long> color_indicator; // set it 0 after using
@@ -50,27 +52,32 @@ vector<long> conflict_vertex_in_color; //all the conflict node
 //vector<long> layer_vertex; // vertex in each layer
 
 vector<long> best_solution;
-vector<long> local_opt_solution;
 long local_opt_cost;
 long best_score;
 unsigned long bms_count;
 long vertex_count;
+long edge_count;
 long cost;
-long k_conflict_color = 8; //打分函数中 减少冲突 和 降低花费 之间的比例系数
-long connect[1500][1500];
-/*
-vector<vector<long>> node_color_score;
-struct node_color
-{
-	long color;
-	long score;
-};
-vector<node_color> Best_node_color;
-*/
+
+long connect[5000][5000];
 
 vector<vector<long>> good_node_color; //记录可以改进冲突和得分的 节点+颜色， 每个节点一个队列来存储
 vector<vector<long>> good_node_color_index; //记录一个颜色在 good_node_color 队列中的位置
 
+//参数
+long k_conflict_color = 15; //打分函数中 减少冲突 和 降低花费 之间的比例系数
+long max_no_impr_basic = 10000;
+long choose_conflict_node_bms = 100;
+long remove_conflict_bms = 50;
+long pertub_bms = 50;
+long big_pertub_bms = 20;
+long big_pertub_num_k = 5; //big_pertub_num = vertex_count / big_pertub_num_k ;
+double max_no_impr_increase_coefficient = 1.3;
+long max_no_impr = 100000;
+long max_iter = 500000000000;
+double tabu_coefficient = 0.1;
+//long max_iter = 100000;
+long conflict_weight;
 
 
 class Vertex_vec_with_index {
@@ -79,14 +86,15 @@ public:
 	Vertex_vec_with_index(vector<long>::size_type max_sz) : vertex_index(max_sz, -1) {}
 	void init(vector<long>::size_type max_sz) {
 #ifndef NDEBUG
-		cout << "initializing Vertex_vec_with_index" << endl;
-		cout << max_sz << "max_sz" <<endl;
+		//cout << "initializing Vertex_vec_with_index" << endl;
+		//cout << max_sz << "max_sz" <<endl;
 #endif
 		vertex_index.clear();
 		vertex_index.resize(max_sz, -1);
 		vertex_vec.clear();
 	}
 	void push_back(long v) {
+		if (vertex_index[v] != -1) return;
 		vertex_index[v] = vertex_vec.size();
 		vertex_vec.push_back(v);
 	}
@@ -94,7 +102,7 @@ public:
 #ifndef NDEBUG
 		if (vertex_index[v] == -1){
 			cout << "remove error: " << v << " not exist" << endl;
-			getchar(); 
+			getchar();
 		}
 		//cout << "remove func debug " << vertex_index[*vertex_vec.rbegin()] << " " << vertex_vec[vertex_index[v]] << endl;
 #endif
@@ -132,6 +140,7 @@ private:
 Vertex_vec_with_index remaining_vertex;
 Vertex_vec_with_index working_vertex;
 Vertex_vec_with_index conflict_node_queue;
+Vertex_vec_with_index valid_node;
 
 
 bool cmp_by_edgeout(long x, long y){
@@ -153,16 +162,20 @@ void build(string file_name) {
 		getline(in_file, line);
 		is.clear();
 		is.str(line);
-		is >> p >> tmp >> vertex_count;
+		is >> p >> tmp >> vertex_count >> edge_count;
 	} while (p != "p");
 
 	cout << line << endl;
+	cout << edge_count <<endl;
 
 	adjacency_list.resize(vertex_count + 1);
     temp_adjacency_list.resize(vertex_count + 1);
 
 	long v1, v2;
 	while (in_file >> tmp >> v1 >> v2) {
+		v1 = v1 - 1;
+		v2 = v2 - 1;
+		//cout << v1 << " " << v2 << endl;
 		//adjacency_list[v2].push_back(v1);
 		if (connect[v1][v2] == 0){
 			connect[v1][v2] = 1;
@@ -183,11 +196,12 @@ void build(string file_name) {
 	conflict_vertex_in_color.resize(vertex_count + 1);
 	vertex_color.resize(vertex_count + 1, -1);
 	remaining_vertex.init(adjacency_list.size());
-	for (vector<vector<long>>::size_type v = 1; v < adjacency_list.size(); ++v) {
+	for (vector<vector<long>>::size_type v = 0; v < adjacency_list.size(); ++v) {
 		remaining_vertex.push_back(v);
 	}
 	working_vertex.init(adjacency_list.size());
     conflict_node_queue.init(adjacency_list.size());
+	valid_node.init(vertex_count + 1);
 	candidate_degree.resize(adjacency_list.size());
 	//best_color_num = adjacency_list.size() - 1;
 
@@ -195,12 +209,13 @@ void build(string file_name) {
 	color_choice.resize(vertex_count + 1, vector<long>(COLOR_NUM, 0));
 	color_use_number.resize(vertex_count + 1, 0);
 	tabu.resize(vertex_count + 1, 0);
+	tabu_c.resize(vertex_count + 1, vector<long>(vertex_count + 1, 0) );
 	conf.resize(vertex_count + 1, 1);
+
 	node_score.resize(vertex_count + 1, 0);
 	best_solution.resize(vertex_count + 1, -1);
-	local_opt_solution.resize(vertex_count + 1, -1);
 
-	good_node_color.resize( vertex_count + 1, vector<long>(0,0) );
+	good_node_color.resize( vertex_count + 1, vector<long>(0,0));
 	good_node_color_index.resize(vertex_count + 1, vector<long>(vertex_count + 1, -1));
 
 	//node_color_score.resize(vertex_count + 1, vector<long>(COLOR_NUM, -1));
@@ -340,12 +355,15 @@ bool remove_clique(){
 void init_color(){
 	//init vertex with random color
 	long remainnign_size = remaining_vertex.size() ;
+	
 	for (auto v : remaining_vertex){
 		long color = rand() % remainnign_size;
+		if (color > max_color) max_color = color;
 		vertex_color[v] = color;
 		cost += color;
 		color_use_number[color]++;
 	}
+
 
 	//init color_choice, conflict
 	for (auto v : remaining_vertex){
@@ -362,17 +380,25 @@ void init_color(){
     for (auto v : remaining_vertex){
         if (conflict_vertex_in_color[v] > 0){
             conflict_node_queue.push_back(v);
-
-			//初始化good_node_color 数组，其中是可以降低冲突并降低花费的选择，之后reduce conflict and color 要从这里面选择
-			long current_color = vertex_color[v];
-			for (long new_color = 0; new_color < current_color; new_color++){
-				if (color_choice[v][new_color] <= color_choice[v][current_color]){
-					good_node_color_index[v][new_color] = good_node_color[v].size();
-					good_node_color[v].emplace_back(new_color);
-				}
-			}
         }
+		
+		//初始化good_node_color 数组，其中是可以降低冲突并降低花费的选择，之后reduce conflict and color 要从这里面选择
+		long current_color = vertex_color[v];
+		for (long new_color = 0; new_color < current_color; new_color++){
+			if (color_choice[v][new_color] <= color_choice[v][current_color]){
+				good_node_color_index[v][new_color] = good_node_color[v].size();
+				good_node_color[v].emplace_back(new_color);
+			}
+		}
     }
+
+	// init good_node_color
+	for (auto n : remaining_vertex){
+		if (good_node_color[n].size() > 0){
+			valid_node.push_back(n);
+		}
+	}
+
 }
 
 
@@ -415,23 +441,13 @@ long choose_conflict_node(){
     return 0;
 }
 
-void choose_conflict_node_new(){ //need to be fiinished
-	long bms = 100;
+void choose_conflict_node_new(long bms){ //need to be fiinished
+	//long bms = 100;
 	long iter = 0;
-
 
 	//add all valid color to the vector
 	while (true)
 	{
-		// #liyan deb
-		/*
-		for (auto v : remaining_vertex){
-			cout << good_node_color[v].size() << " ";
-		}
-		cout << endl;
-		getchar();
-		*/
-
 		vector<long> valid_node;
 		for (auto n : remaining_vertex){
 			if (good_node_color[n].size() > 0){
@@ -442,22 +458,38 @@ void choose_conflict_node_new(){ //need to be fiinished
 
 		long best_node = -1;
 		long best_color = -1;
-		long best_score = -1;
+		long best_color_score = -1;
 		for (long i = 0; i < bms; i++){
+			//with low prop ranom choose
+			long prop = rand() * 100 / RAND_MAX;
+			/*
+			if (prop < 2){
+				long index = rand() % valid_node.size();
+				best_node = valid_node[index];
+				index = rand() % good_node_color[best_node].size();
+				best_color = good_node_color[best_node][index];
+				best_color_score = 0;
+				//break;
+			}
+			*/
 			//choose a rand node and rand color
 			long index = rand() % valid_node.size();
 			long node = valid_node[index];
 			index = rand() % good_node_color[node].size();
 			long new_color = good_node_color[node][index];
+			if (conf[node] == 0) continue;
+			if (tabu[node] > current_iter) continue;
 
 			long current_color = vertex_color[node];
-			long score = current_color - new_color + k_conflict_color * (color_choice[node][current_color] - color_choice[node][new_color]);
+			//long score = current_color - new_color + k_conflict_color * (color_choice[node][current_color] - color_choice[node][new_color]);
+			long score = (current_color - new_color) * (color_choice[node][current_color] - color_choice[node][new_color] + 1);
+
 			// #liyan debug
 			//cout << node << " color " << new_color << " score " << score << endl;
 			//getchar();
 
-			if (score > best_score){
-				best_score = score;
+			if (score > best_color_score){
+				best_color_score = score;
 				best_node = node;
 				best_color = new_color;
 			}
@@ -465,78 +497,62 @@ void choose_conflict_node_new(){ //need to be fiinished
 		// #liyan debug
 		//cout << best_node << " " << vertex_color[best_node] << " " << color_choice[best_node][vertex_color[best_node]] << endl;
 		//cout << best_color << " " <<  color_choice[best_node][best_color] << endl;
-		if (best_score < 0)break;
+		if (best_color_score < 0)break;
 		color_node(best_node, best_color);
+		tabu[best_node] = current_iter + TABU_TIME;
+		current_iter++;
+		no_impr++;
 	}
 	
 }
 
-//just decrease cost
-void decrease_node_color(){
-    long iter = 0;
-    long last_impr = 0;
-	long T_iter = 100;
-
-    while (last_impr + T_iter > iter){
-		
-		no_impr++;
-
-        long node = rand() % remaining_vertex.size();
-		long current_color = vertex_color[node];
-		vector<long> valid_color;
-
-		if (conf[node] == 0)continue;
-		if (tabu[node] > current_iter) continue;
-
-		for (long c = 0; c < current_color; c++){
-			if (color_choice[node][c] == 0) valid_color.push_back(c);
-		}
-		if (!valid_color.empty()){
-			long index = rand() % valid_color.size();
-			long color = valid_color[index];
-			color_node(node, color);
-			last_impr = iter;
-			current_iter++;
-		}
-		iter++;
+// if else 多样性
+//choose and return a var
+long choose_good_node(long bms, long& BestNode, long& BestColor){
+	//long bms = 100;
+	if (!valid_node.empty() && rand() % 100 < 1){
+		long index = rand() % valid_node.size();
+		long node = valid_node[index];
+		index = rand() % good_node_color[node].size();
+		long new_color = good_node_color[node][index];
+		BestNode = node;
+		BestColor = new_color;
+		return 1;
 	}
-}
 
-// score each choice and choose
-void decrease_node_color_new(){
 	long iter = 0;
-    long last_impr = 0;
+	long best_node = -1;
+	long best_color = -1;
+	long best_color_score = -1;
 
-    while (last_impr + 100 > iter){
-		
-		no_impr++;
+	if (!valid_node.empty()){
+		for (long i = 0; i < bms; i++){
+			//choose a rand node and rand color
+			long index = rand() % valid_node.size();
+			long node = valid_node[index];
+			index = rand() % good_node_color[node].size();
+			long new_color = good_node_color[node][index];
+			if (conf[node] == 0) continue;
+			//if (tabu[node] > current_iter) continue;
+			if (tabu_c[node][new_color] > current_iter )continue;
 
-        long node = rand() % remaining_vertex.size();
-		long current_color = vertex_color[node];
-		vector<long> valid_color;
+			long current_color = vertex_color[node];
+			long score = current_color - new_color + k_conflict_color * (color_choice[node][current_color] - color_choice[node][new_color]);
+			//long score = (current_color - new_color) * (color_choice[node][current_color] - color_choice[node][new_color] + 1);
 
-		if (conf[node] == 0)continue;
-		if (tabu[node] > current_iter) continue;
-
-		for (long c = 0; c < current_color; c++){
-			long choose_propbaility = 3;
-			if (color_choice[node][c] == 0) {
-				for (long i = 0; i < choose_propbaility; i++){
-					valid_color.push_back(c);
-				}
-				if (choose_propbaility > 1)choose_propbaility--;
-			} 
+			if (score > best_color_score){
+				best_color_score = score;
+				best_node = node;
+				best_color = new_color;
+			}
 		}
-		if (!valid_color.empty()){
-			long index = rand() % valid_color.size();
-			long color = valid_color[index];
-			color_node(node, color);
-			last_impr = iter;
-			current_iter++;
-		}
-		iter++;
+		BestNode = best_node;
+		BestColor = best_color;
+		return 1;
 	}
+	return 0;
 }
+
 
 void decrease_color(){
 	long sz = remaining_vertex.size();
@@ -546,6 +562,10 @@ void decrease_color(){
 		long node = remaining_vertex[index];
 		long best_color = -1;
 		long current_color = vertex_color[node];
+
+		//if(conf[node] == 0)continue;
+		//if (tabu[node] > current_iter)continue;
+
 		for (long new_color = 0; new_color > current_color; new_color++){
 			if (color_choice[node][new_color] == 0){
 				best_color = new_color;
@@ -554,27 +574,27 @@ void decrease_color(){
 		}
 		if (best_color != -1 && best_color < current_color){
 			color_node(node, best_color);
+			//tabu[node] = current_iter + TABU_TIME;
+			current_iter++;
+			no_impr++;
 		}
 	}
 }
 
+
 long remove_conflict(){
+
 	long max_iter_rc = vertex_count;
 	long iter_rc = 0;
 	while (edge_conflict > 0 && iter_rc < max_iter_rc)
 	{
-		
 		iter_rc++;
 		no_impr++;
 
 		long index = rand() % conflict_node_queue.size();
 		long node = conflict_node_queue[index];
 		long current_color = vertex_color[node];
-		//#liyan debug
-		//for (auto v : conflict_node_queue){
-			//cout << v << " color: " << vertex_color[v] << " ";
-		//}
-		//cout << endl << "conf node: " << node << " " << conf[node] << endl; 
+
 		if (conf[node] == 0) continue;
 		if (tabu[node] > current_iter) continue;
 
@@ -591,9 +611,205 @@ long remove_conflict(){
 		long new_color = valid_color[index];
 		color_node(node,new_color);
 		current_iter++;
+		no_impr++;
+		tabu[node] = current_iter + TABU_TIME;
 		
 	}
 	return edge_conflict;
+}
+
+
+long remove_conflict_new2(long bms){
+	long max_iter_rc = vertex_count;
+	long iter_rc = 0;
+	//long bms = 10;
+	long problem = 0;
+	
+	//if (problem > 0) cout << "problem:" << problem << endl;
+	/*
+	vector<long> least_pointer;
+	least_pointer.resize(vertex_count + 1, -1);
+	for (auto v : conflict_node_queue){
+		for (long c = 0; c <= max_color + 1; c++){
+			if (color_choice[v][c] == 0){
+				least_pointer[v] = c;
+				break;
+			}
+		}
+	}
+	*/
+
+	while (edge_conflict > 0 && iter_rc < max_iter_rc)
+	{
+		iter_rc++;
+		no_impr++;
+		long best_rm_score = - vertex_count * max_color;
+		long best_node = -1;
+		long best_color = -1;
+		for (long i = 0; i < bms; i++){
+			long index = rand() % conflict_node_queue.size();
+			long node = conflict_node_queue[index];
+			long current_color = vertex_color[node];
+			long new_color = -1;
+			double score = 0;
+
+			if (conf[node] == 0) continue;
+			if (tabu[node] > current_iter) continue;
+			//find the least conflictless color
+			//cout << "max color" << max_color << endl;
+			for (long c = 0; c <= max_color + 1; c++){
+				if (color_choice[node][c] == 0){
+					new_color = c;
+					break;
+				}
+			}
+			if (new_color < 0){
+				cout << node << " " << new_color << "error" << endl;
+				getchar(); 
+			}
+			//降低花费 同时 降低冲突，好节点，优先选择
+			if (new_color < current_color){
+				best_color = new_color;
+				best_node = node;
+				break;
+			}
+			if (new_color == current_color){
+				continue;
+			}
+			score = color_choice[node][current_color] * 100 / (new_color - current_color);
+			//cout << score << " ";
+			for (auto v : temp_adjacency_list[node]){
+				long current_neighbor_color = vertex_color[v];
+				if (color_choice[v][current_neighbor_color] > 0 && color_choice[v][new_color] == 0){
+					score -= color_choice[v][current_neighbor_color] * 100 / (new_color - current_neighbor_color); 
+				}
+			}
+			if (score > best_rm_score){
+				best_rm_score = score;
+				best_node = node;
+				best_color = new_color;
+			}
+		}
+		if (best_node == -1)break;
+		color_node(best_node, best_color);
+		current_iter++;
+		no_impr++;
+	}
+	return edge_conflict;
+}
+
+//remove 1 conflict
+long remove_conflict_new_3(long bms){
+	if(edge_conflict > 0){
+		long best_rm_score = - vertex_count * max_color;
+		long best_node = -1;
+		long best_color = -1;
+		for (long i = 0; i < bms; i++){
+			long index = rand() % conflict_node_queue.size();
+			long node = conflict_node_queue[index];
+			long current_color = vertex_color[node];
+			long new_color = -1;
+			double score = 0;
+
+			if (conf[node] == 0 && edge_conflict > 3) continue;
+			if (tabu[node] > current_iter && edge_conflict > 3) continue;
+			//find the least conflictless color
+			//cout << "max color" << max_color << endl;
+			for (long c = 0; c <= max_color + 1; c++){
+				if (color_choice[node][c] == 0){
+					new_color = c;
+					break;
+				}
+			}
+			if (new_color < 0){
+				cout << node << " " << new_color << "error" << endl;
+				getchar();
+			}
+			//降低花费 同时 降低冲突，好节点，优先选择
+			if (new_color < current_color){
+				best_color = new_color;
+				best_node = node;
+				break;
+			}
+			if (new_color == current_color){
+				continue;
+			}
+			score = color_choice[node][current_color] * 100 / (new_color - current_color);
+			//cout << score << " ";
+			/*
+			for (auto v : temp_adjacency_list[node]){
+				long current_neighbor_color = vertex_color[v];
+				if (color_choice[v][current_neighbor_color] > 0 && color_choice[v][new_color] == 0){
+					//score--;//	更改了remove color 中的选择标准
+					score -= color_choice[v][current_neighbor_color] * 100 / (new_color - current_neighbor_color); 
+				}
+			}
+			*/
+			if (score > best_rm_score){
+				best_rm_score = score;
+				best_node = node;
+				best_color = new_color;
+			}
+		}
+		if (best_node == -1) return 0;
+		color_node(best_node, best_color);
+		current_iter++;
+		no_impr++;
+		return 1;
+	}
+	return 0;
+}
+
+long remove_conflict_new4(){
+	if (edge_conflict > 0){
+		long index = rand() % conflict_node_queue.size();
+		long node = conflict_node_queue[index];
+		long current_color = vertex_color[node];
+		long new_color = -1;
+
+		if (conf[node] == 0) return 0;
+		//if (tabu[node] > current_iter) return 0;
+		
+		//new_color = current_color + 1 + rand() % (max_color - current_color + 1);
+		new_color = max_color + 1;
+		color_node(node, new_color);
+		current_iter++;
+		no_impr++;
+		tabu[node] = current_iter + TABU_TIME;
+		tabu_c[node][new_color] = current_iter + TABU_TIME + tabu_coefficient * edge_conflict;
+	}
+
+	return 1;
+}
+
+long remove_conflict_new5(long bms){
+	if (edge_conflict > 0){
+		long best_node = -1;
+		long best_choice_score = -1;
+		long bms = 1;
+		for (long i = 0; i < bms; i++){
+			long index = rand() % conflict_node_queue.size();
+			long node = conflict_node_queue[index];
+			long current_color = vertex_color[node];
+			if (conf[node] == 0 && conflict_node_queue.size() > 3) continue;
+			if (tabu[node] > current_iter && conflict_node_queue.size() > 3) continue;
+			if (color_choice[node][current_color] > best_choice_score){
+				best_choice_score = color_choice[node][current_color];
+				best_node = node;
+			}
+		}
+		if (best_node == -1) return 0;
+
+		//new_color = current_color + 1 + rand() % (max_color - current_color + 1);
+		long new_color = max_color + 1;
+		color_node(best_node, new_color);
+		current_iter++;
+		no_impr++;
+		tabu[best_node] = current_iter + TABU_TIME;
+		return 1;
+	}
+	return 0;
+	
 }
 
 //color begins from 0, and score begins from 1, so need add 1 in computing score
@@ -602,26 +818,76 @@ long compute_score(){
 	for (auto v : remaining_vertex){
 		sum_score += vertex_color[v] + 1;
 	}
+
+	for (long c = 1; c <= max_color; c++){
+		if (color_use_number[c] > color_use_number[c-1]){
+			swap_two_color(c-1, c);
+			return sum_score;
+		}
+	}
 	return sum_score;
 }
 
-// decrease some node
-void perturbation(){
+long compute_best_score(){
+	long sum = 0;
+	vector<long> color_num;
+	for (long c = 0; c <= max_color; c++){
+		color_num.push_back(color_use_number[c]);
+	}
+	sort(color_num.rbegin(),color_num.rend());
+	for (long c = 0; c <= max_color; c++){
+		sum = sum + color_num[c] * (c + 1);
+	}
+	//每次交换两个颜色，逐步使它达到递减排序
+	for (long c = 1; c <= max_color; c++){
+		if (color_use_number[c] > color_use_number[c-1]){
+			swap_two_color(c-1,c);
+			//while(color_use_number[c] > color_use_number[c-1] && c >= 1){
+			//	swap_two_color(c-1,c);
+			//	c--;
+			//}
+			return sum - 1;
+		}
+	}
 
-	long bms = 45;
+	return sum - 1;
+}
+
+// decrease some node
+void perturbation(long bms, long conflict_weight){
+
 	long best_node = -1;
 	long best_color = -1;
 	long best_node_old_color = -1;
 	long best_choose_score = -vertex_count;
+	/*
+	long rand_prop = rand() % 100;
+	if(rand_prop < 0){
+		long index = rand() % remaining_vertex.size();
+		long node = remaining_vertex[index];
+		long current_color = vertex_color[node];
+		long new_color = rand() % (max_color - current_color + 1) + current_color + 1;
+		color_node(node,new_color);
+		return;
+	}
+	*/
+
 	for (long i = 0; i < bms; ++i){
 		long index = rand() % remaining_vertex.size();
 		long node = remaining_vertex[index];
 		long current_color = vertex_color[node];
 
 		//#liyan 2 choice
-		long new_color = rand() % (max_color - current_color + 1) + current_color ;
+		//long new_color = rand() % (max_color - current_color + 1) + current_color + 1;
+		long new_color = rand() % (max_color + 2);
+		
+		if (conf[node] == 0) continue;
+		//if (tabu[node] > current_iter) continue;
+		if (tabu_c[node][new_color] > current_iter )continue;
+		
+		//if(rand() % 2 == 0) new_color++;
 		//long new_color = rand() % (current_color + 1);
-		long choose_score = current_color - new_color;
+		long choose_score = (current_color - new_color) ;
 		for (auto v : temp_adjacency_list[node]){
 			/*
 			//basic score function
@@ -631,7 +897,7 @@ void perturbation(){
 			if (vertex_color[v] == new_color) choose_score--;
 			*/
 
-			
+			/*
 			//consider color-choice[node][color] == 1 or color_choice[node][color] == 2
 			vector<long> valid_node;
 			if (color_choice[v][current_color] == 2 && vertex_color[v] > current_color){
@@ -654,61 +920,72 @@ void perturbation(){
 				}
 			}
 			if (vertex_color[v] == new_color) choose_score -= 3;
+			*/
 			
-			
-			/*
 			// color_choice and the cost change
-			vector<long> valid_node;
-			long max_color_impr = 2;
-			if (color_choice[v][current_color] == 2 && vertex_color[v] > current_color){
+			vector<long> added_node;
+			/*
+			if (color_choice[v][current_color] == 5 && vertex_color[v] > current_color){
 				bool flag = true;
-				for (auto u : valid_node){
+				for (auto u : added_node){
 					if (connect[v][u] == 1) flag = false;
 				}
 				if (flag == true){
-					long delta_color = (vertex_color[v] - current_color);
-					choose_score += delta_color / 3;
-					if (delta_color > max_color) max_color_impr = delta_color;
+					long delta_color = (vertex_color[v] - current_color) / 16;
+					choose_score += delta_color ;
+					//added_node.push_back(v);
 				}
 			}
+			
+			if (color_choice[v][current_color] == 4 && vertex_color[v] > current_color){
+				bool flag = true;
+				for (auto u : added_node){
+					if (connect[v][u] == 1) flag = false;
+				}
+				if (flag == true){
+					long delta_color = (vertex_color[v] - current_color) / 8;
+					choose_score += delta_color ;
+					//added_node.push_back(v);
+				}
+			}
+
+			if (color_choice[v][current_color] == 3 && vertex_color[v] > current_color){
+				bool flag = true;
+				for (auto u : added_node){
+					if (connect[v][u] == 1) flag = false;
+				}
+				if (flag == true){
+					long delta_color = (vertex_color[v] - current_color) / 4;
+					choose_score += delta_color ;
+					//added_node.push_back(v);
+				}
+			}
+			*/
+			if (color_choice[v][current_color] == 2 && vertex_color[v] > current_color){
+				bool flag = true;
+				for (auto u : added_node){
+					if (connect[v][u] == 1) flag = false;
+				}
+				if (flag == true){
+					long delta_color = (vertex_color[v] - current_color)/2 ;
+					choose_score += delta_color ;
+					//added_node.push_back(v);
+				}
+			}
+			
 			if (color_choice[v][current_color] == 1 && vertex_color[v] > current_color){
 				bool flag = true;
-				for (auto u : valid_node){
+				for (auto u : added_node){
 					if (connect[v][u] == 1) flag = false;
 				}
 				if (flag == true){
 					long delta_color = (vertex_color[v] - current_color);
 					choose_score += delta_color;
-					if (delta_color > max_color) max_color_impr = delta_color;
+					//added_node.push_back(v);
 				}
 			}
-			if (vertex_color[v] == new_color) choose_score -= max_color_impr;
-			*/
-
-			/*
-			vector<long> valid_node;
-			if (color_choice[v][current_color] == 2 && vertex_color[v] > current_color){
-				bool flag = true;
-				for (auto u : valid_node){
-					if (connect[v][u] == 1) flag = false;
-				}
-				if (flag == true){
-					choose_score++;
-				}
-			}
-			if (color_choice[v][current_color] == 1 && vertex_color[v] > current_color){
-				bool flag = true;
-				for (auto u : valid_node){
-					if (connect[v][u] == 1) flag = false;
-				}
-				if (flag == true){
-					valid_node.push_back(v);
-					choose_score += 3;
-				}
-			}
-			if (vertex_color[v] == new_color) choose_score -= 3;
-			*/
-			
+			if (vertex_color[v] == new_color) choose_score -= conflict_weight;
+			if (vertex_color[v] == current_color) choose_score += conflict_weight;
 		}
 		if (choose_score > best_choose_score){
 			best_node = node;
@@ -717,53 +994,32 @@ void perturbation(){
 			best_choose_score = choose_score;
 		}
 	}
+	long current_color = vertex_color[best_node];
+	no_impr++;
 	color_node(best_node, best_color);
 	current_iter++;
-	tabu[best_node] = current_iter + TABU_TIME;
+	//tabu[best_node] = current_iter + TABU_TIME;
+	tabu_c[best_node][best_color] = current_iter + TABU_TIME + tabu_coefficient * edge_conflict;
+	/**/
+	for (auto v : temp_adjacency_list[best_node]){
+		long neighbor_color = vertex_color[v];
+		if (color_choice[v][current_color] == 0 && neighbor_color > current_color){
+			if (conf[v] == 0) continue;
+			//if (tabu[v] > current_iter) continue;
+			if (tabu_c[v][current_color] > current_iter )continue;
 
-
-
-	long pert_num = 0;
-	for (long i = 0; i < pert_num; i++){
-		long best_node = -1;
-		long best_color = -1;
-		long best_node_old_color = -1;
-		long best_choose_score = -vertex_count;
-		for (long i = 0; i < bms; ++i){
-			long index = rand() % remaining_vertex.size();
-			long node = remaining_vertex[index];
-			long current_color = vertex_color[node];
-			long new_color = rand() % (max_color - current_color + 1) + current_color ;
-			long choose_score = current_color - new_color;
-			for (auto v : temp_adjacency_list[node]){
-				/*
-				if (color_choice[v][current_color] == 2 && vertex_color[v] > current_color){
-					choose_score++;
-				}
-				*/
-				if (color_choice[v][current_color] == 2 && vertex_color[v] > current_color){
-					choose_score++;
-				}
-				if (color_choice[v][current_color] == 1 && vertex_color[v] > current_color){
-					choose_score += 3;
-				}
-				if (vertex_color[v] == new_color) choose_score -= 3;
-			}
-			if (choose_score > best_choose_score){
-				best_node = node;
-				best_color = new_color;
-				best_node_old_color = vertex_color[node];
-				best_choose_score = choose_score;
-			}
+			color_node(v,current_color);
+			no_impr++;
+			current_iter++;
+			tabu[best_node] = current_iter + TABU_TIME;
+			tabu_c[v][current_color] = current_iter + TABU_TIME + tabu_coefficient * edge_conflict;
 		}
-		color_node(best_node, best_color);
-		tabu[best_node] = current_iter + TABU_TIME;
-		current_iter++;
+
 	}
+	
 }
 
-void big_pertub(long pertub_num){
-	long bms = 5;
+void big_pertub(long pertub_num, long bms, long conflict_weight){
 
 	for (long i = 0; i < pertub_num; ++i){
 		long best_node = -1;
@@ -771,16 +1027,21 @@ void big_pertub(long pertub_num){
 		long best_node_old_color = -1;
 		long best_choose_score = -vertex_count;
 		
-		long rand_color = rand() * 100 / RAND_MAX;
-		if (rand_color <= 2){
+		long rand_color = rand() % 100;
+		if (rand_color <= 100){
 			long index = rand() % remaining_vertex.size();
 			long node = remaining_vertex[index];
 			long current_color = vertex_color[node];
-			long new_color = rand() % (max_color - current_color + 1) + current_color ;
+			//long new_color = rand() % (max_color - current_color + 1) + current_color + 1;
+			long new_color = rand() % (max_color + 2);
 			color_node(node, new_color);
+			no_impr++;
+			current_iter++;
+			tabu[node] = current_iter + TABU_TIME;
+			tabu_c[node][new_color] = current_iter + TABU_TIME + tabu_coefficient * edge_conflict;
 			continue;
 		}
-		
+		/*
 		for (long i = 0; i < bms; ++i){
 			long index = rand() % remaining_vertex.size();
 			long node = remaining_vertex[index];
@@ -791,12 +1052,6 @@ void big_pertub(long pertub_num){
 			//long new_color = rand() % (current_color + 1);
 			long choose_score = 0;
 			for (auto v : temp_adjacency_list[node]){
-				/*
-				if (color_choice[v][current_color] == 1 && vertex_color[v] > current_color){
-					choose_score++;
-				}
-				if (vertex_color[v] == new_color) choose_score--;
-				*/
 
 				if (color_choice[v][current_color] == 2 && vertex_color[v] > current_color){
 					choose_score++;
@@ -814,17 +1069,48 @@ void big_pertub(long pertub_num){
 				best_choose_score = choose_score;
 			}
 		}
+		*/
+
+		for (long i = 0; i < bms; ++i){
+			long index = rand() % remaining_vertex.size();
+			long node = remaining_vertex[index];
+			long current_color = vertex_color[node];
+
+			//#liyan 2 choice
+			long new_color = rand() % (max_color + 2) ;
+			//long new_color = rand() % (current_color + 1);
+			long choose_score = (current_color - new_color) ;
+			choose_score -= color_choice[node][new_color] * conflict_weight;
+			for (auto v : temp_adjacency_list[node]){
+
+				if (color_choice[v][current_color] == 2 && vertex_color[v] > current_color){
+					long delta_color = (vertex_color[v] - current_color);
+					choose_score += delta_color / 2;
+				}
+				if (color_choice[v][current_color] == 1 && vertex_color[v] > current_color){
+					long delta_color = (vertex_color[v] - current_color);
+					choose_score += delta_color;
+				}
+
+			}
+			if (choose_score > best_choose_score){
+				best_node = node;
+				best_color = new_color;
+				best_node_old_color = vertex_color[node];
+				best_choose_score = choose_score;
+			}
+		}
 
 		color_node(best_node, best_color);
 		tabu[best_node] = current_iter + TABU_TIME;
+		tabu_c[best_node][best_color] = current_iter + TABU_TIME + tabu_coefficient * edge_conflict;
 		current_iter++;
+		no_impr++;
 	}
 }
 
-void swap_two_color(){
-	cout << "swap" << endl;
-	long color_1 = rand() % (max_color - 1);
-	long color_2 = color_1 + 1;
+void swap_two_color(long color_1, long color_2){
+	//cout << "swap" << endl;
 	if (color_1 == color_2) return;
 	//#liyan debug
 	//cout << "swap color: " << color_1 << " " << color_2 << endl;
@@ -838,6 +1124,7 @@ void swap_two_color(){
 		}
 	}
 }
+
 
 void update_best_solution(){
 	//find the best local optimal, and then update the best solution
@@ -853,36 +1140,40 @@ void update_best_solution(){
 				break;
 			}
 		}
-
+		//cout << node << " " << current_color << " ";
+		//cout << vertex_color[0] << " ";
+		
 		if (best_color != current_color) color_node(node, best_color);
 	}
-	
+
 	//update the best solution
 	long score = 0;
-	score = compute_score();
+	//score = compute_score();
+	score = compute_best_score();
 	if (score < best_score){
 		best_score = score;
 		for (auto v : remaining_vertex){
 			best_solution[v] = vertex_color[v];
 		}
 	}
+	//sort color
+	/**/
+	for (long i = 1; i <= max_color; i++){
+		for (long j = i; j < max_color; j++){
+			if (color_use_number[j-1] < color_use_number[j]){
+				swap_two_color(j,j-1);
+			}
+		}
+	}
+	
 }
 
-// using score function to choose node
-long choose_node(){
-	long bms = 20;
-	long best_node = -1;
-	long best_node_score = -1;
-	long best_color = -1;
-
-
-	return 0;
-}
 
 
 bool color_node(long node, long color){
+
 	//tabu[node] = current_iter + TABU_TIME;
-	
+
 	//update config checking vector
 	node_score[node] = 0;
 	//conf[node] = 0;
@@ -896,9 +1187,9 @@ bool color_node(long node, long color){
 	long old_color = vertex_color[node];
 	cost = cost - old_color + color;
 
-	
 	color_use_number[old_color]--;
 	color_use_number[color]++;
+	
 	//update max_color
 	if (color > max_color) max_color = color;
 	if (old_color == max_color){
@@ -917,28 +1208,35 @@ bool color_node(long node, long color){
 		color_choice[v][color]++;
 		long current_neighbor_color = vertex_color[v];
 
+		// color在good_node_color[v]中但是由于更新使它冲突增加，不再是候选节点
 		if (good_node_color_index[v][color] != -1){
 			if (color_choice[v][color] > color_choice[v][current_neighbor_color]){
 				long index_color = good_node_color_index[v][color];
 				long end_color = *good_node_color[v].rbegin();
 
 				good_node_color[v][index_color] = *good_node_color[v].rbegin();
-				good_node_color.pop_back();
+				good_node_color[v].pop_back();
 				good_node_color_index[v][end_color] = index_color;
 				good_node_color_index[v][color] = -1;
+				//valid node update
+				if (good_node_color[v].empty()) valid_node.remove(v);
 			}
 		}
+		//old_color 不在good_node_color[v]中， 但是更新使它的冲突下降，让它加入到其中。
 		if (good_node_color_index[v][old_color] == -1){
 			if (old_color < current_neighbor_color && color_choice[v][old_color] <= color_choice[v][current_neighbor_color]){
 				good_node_color_index[v][old_color] = good_node_color[v].size();
 				good_node_color[v].push_back(old_color);
+				//valid node update
+				if (good_node_color[v].size() == 1)valid_node.push_back(v);
 			}
-
 		}
 
 		// old color has conflict with v
 		if (vertex_color[v] == old_color){
 			conflict_vertex_in_color[v]--;
+			//if (node == 285 && v == 143){cout << "hhh" << old_color << " " << color << " " << vertex_color[143] << endl; 
+			//cout << color_choice[v][old_color]; getchar();}
 			if (color_choice[v][old_color] == 0){
 				conflict_node_queue.remove(v);
 			}
@@ -954,10 +1252,12 @@ bool color_node(long node, long color){
 					good_node_color[v].pop_back();
 					good_node_color_index[v][end_color] = index_c;
 					good_node_color_index[v][neighbor_c] = -1;			
+					//update valid node
+					if (good_node_color[v].empty())valid_node.remove(v);
 				}
 			}
 		}
-		//new color has conflict with color
+		//new color has conflict with v
 		if (vertex_color[v] == color){
 			conflict_vertex_in_color[v]++;
 			if (color_choice[v][color] == 1){
@@ -965,11 +1265,12 @@ bool color_node(long node, long color){
 			}
 
 			// update good_node_color 	
-			long current_neighbor_color = vertex_color[v];
 			for (long new_c = 0; new_c < current_neighbor_color; new_c++){
-				if (color_choice[v][new_c] == color_choice[v][current_neighbor_color]){
+				if (color_choice[v][new_c] == color_choice[v][current_neighbor_color] && good_node_color_index[v][new_c] == -1){
 					good_node_color_index[v][new_c] = good_node_color[v].size();
 					good_node_color[v].push_back(new_c);
+					//update valid node
+					if (good_node_color[v].size() == 1)valid_node.push_back(v);
 				}
 			}
 		}
@@ -978,20 +1279,21 @@ bool color_node(long node, long color){
 			++old_conflict;
 		} 
 		if (vertex_color[v] == color) ++new_conflict;
+	}
 
-		//update good_node_color	last_stop here;
-		for(auto c : good_node_color[node]){
-			good_node_color_index[node][c] = -1;
+	//update good_node_color
+	for(auto c : good_node_color[node]){
+		good_node_color_index[node][c] = -1;
+	}
+	good_node_color[node].clear(); 
+	if (valid_node.exist(node))valid_node.remove(node);
+	
+	 for (long new_c = 0; new_c < color; new_c++){
+		if (color_choice[node][new_c] <= color_choice[node][color]){
+			good_node_color_index[node][new_c] = good_node_color[node].size();
+			good_node_color[node].push_back(new_c);
+			if (good_node_color[node].size() == 1)valid_node.push_back(node);
 		}
-		good_node_color[node].clear();
-		
-		 for (long new_c = 0; new_c < color; new_c++){
-			if (color_choice[node][new_c] <= color_choice[node][color]){
-				good_node_color_index[node][new_c] = good_node_color[node].size();
-				good_node_color[node].push_back(new_c);
-			}
-		}
-
 	}
 
 	//update conflict node queue
@@ -1006,121 +1308,177 @@ bool color_node(long node, long color){
 	edge_conflict = edge_conflict - 2*old_conflict + 2*new_conflict;
 	
 	vertex_color[node] = color;
-	
+	//cout << vertex_color[1] << endl;
+	//cout << color_choice[143][17] << " " << node << " " << color << endl;
 	return true;
 }
 
-void restore_local_opt(){
-	if (local_opt_cost == cost){
-		bool equal_flag = true;
-		for (auto v : remaining_vertex){
-			if (vertex_color[v] != local_opt_solution[v]){
-				equal_flag = false;
-				break;
+bool verify_solution(){
+	for (auto v : remaining_vertex){
+		for (auto u : temp_adjacency_list[v]){
+			if (vertex_color[v] == vertex_color[u]){
+				return false;
 			}
 		}
-		if (equal_flag == true){
-			big_pertub(remaining_vertex.size()/4);
-			big_pert_num++;
-		}
 	}
-	else{
-		local_opt_cost = cost;
-		for (auto v : remaining_vertex){
-			local_opt_solution[v] = vertex_color[v];
+	return true;
+}
+
+static double luby(double y, int x){
+
+    // Find the finite subsequence that contains index 'x', and the
+    // size of that subsequence:
+    int size, seq;
+    for (size = 1, seq = 0; size < x+1; seq++, size = 2*size+1);
+
+    while (size-1 != x){
+        size = (size-1)>>1;
+        seq--;
+        x = x % size;
+    }
+
+    return pow(y, seq);
+}
+
+void localsearch_new(){
+	if (conflict_weight == 0) conflict_weight = 1;
+
+	best_score = vertex_count * vertex_count;
+	long big_pert_num = 0;
+	long decrease_time = 0;
+	long decrease_score = vertex_count * vertex_count;
+	while (current_iter < max_iter)
+	{
+		long best_node = -1;
+		long best_color = -1;
+		long x = choose_good_node(choose_conflict_node_bms,best_node,best_color);
+		if (x == 1 && best_node != -1){//good_var 不为空
+			color_node(best_node,best_color);
+			current_iter++;
+			no_impr++;
+			tabu[best_node] = current_iter + TABU_TIME;
+			tabu_c[best_node][best_color] = current_iter + TABU_TIME + tabu_coefficient * edge_conflict;
 		}
+		else{
+			//remove_conflict_new_3(remove_conflict_bms);
+			remove_conflict_new4();
+		}
+
+		long score = 0;
+		if (edge_conflict == 0) {
+			score = compute_best_score();
+			//cout << score << " " << best_score << endl;
+			if (score < decrease_score){
+				decrease_score = score;
+				decrease_time = current_iter;
+			}
+		}
+		//if (edge_conflict == 0) score = compute_score();
+		//cout << (edge_conflict == 0 && score < best_score) << endl;
+		if (edge_conflict == 0 && score < best_score) {
+			update_best_solution();
+			if (!verify_solution()){
+				cout << "solution error" << endl;
+				getchar();
+			}
+			cout << "best score: " << best_score << " " << current_iter << " " << no_impr << endl;
+			no_impr = 0;
+			big_pert_node_num = vertex_count / big_pertub_num_k;
+			cout << "color use num";
+			//big_pert_node_num = 5;
+			for (long c = 0; c <= max_color; c++){
+				cout << color_use_number[c] << " ";
+			}
+			cout <<endl;
+		}
+		/*
+		if (no_impr > max_no_impr){
+			big_pertub(big_pert_node_num,big_pertub_bms,conflict_weight);
+			//if (max_no_impr < max_no_impr_basic * 10) max_no_impr = max_no_impr * max_no_impr_increase_coefficient;
+			max_no_impr = luby(2,big_pert_num) * max_no_impr_basic; //using luby restart
+			//max_no_impr = pow(1.5, luby(2,big_pert_num)) * max_no_impr_basic; //using luby restart
+			no_impr = 0;
+			big_pert_num++;
+			//cout << "big pertube" << endl;
+		}
+		*/
+	if (decrease_time + max_no_impr < current_iter){
+		big_pertub(big_pert_node_num,big_pertub_bms,conflict_weight);
+		no_impr = 0;
+		big_pert_num++;
+		decrease_time = current_iter;
+		decrease_score = vertex_count * vertex_count;
+		max_no_impr = luby(2,big_pert_num) * max_no_impr_basic; //using luby restart
+		//cout << "big pertube" << endl;
+	}
+		//long prop = rand() % 100;
+		if (edge_conflict == 0) perturbation(pertub_bms, conflict_weight);
+		//else if (prop < 10) {perturbation(pertub_bms, conflict_weight);}
 	}
 }
 
-
 int main(int argc, char* argv[]){
 	string file_name;
-
-	unsigned long bms_min = 1, bms_max = 64;
-	bms_count = bms_min;
-
 	long seed = 1;
-	srand(2);
+	srand(1);
 
 	int proportion = 100;
 	int size_threshold = 1000;
+	file_name = argv[1];
+	long c_bms;
+	long r_bms;
+	long p_bms;
+	long bp_bms;
+	long bpn;
+	long cw;
+	long kcc;
+	long bpnimpr_basic;
+	//cin >> c_bms >> r_bms >> p_bms >> bp_bms >>bpn >> cw >> kcc;
+	/*
+	c_bms = atoi(argv[2]);
+	p_bms = atoi(argv[3]);
+	bp_bms = atoi(argv[4]);
+	bpn = atoi(argv[5]);
+	cw = atoi(argv[6]);
+	kcc = atoi(argv[7]);
+	bpnimpr_basic = atoi(argv[8]);
+	*/
 
-	char optc;
-	while ((optc = getopt(argc, argv, "f:s:b:p:t:")) != -1) {
-		switch (optc) {
-			case 'f':
-				file_name = optarg;
-				break;
-			case 's':
-				seed = atoi(optarg);
-				srand(seed);
-				break;
-			case 'b':
-				bms_max = atoi(optarg);
-				break;
-			case 'p':
-				proportion = atoi(optarg);
-				break;
-			case 't':
-				size_threshold = atoi(optarg);
-				break;
-			default:
-				std::cout << "usage: " << std::endl;
-				return 1;
-		}
-	}
+
+	//参数设置 parameter
+	max_no_impr = 100000;
+	//k_conflict_color = 10; //choose_conflict_node_new 打分函数中 减少冲突 和 降低花费 之间的比例系数
+
+	cout << c_bms << " " << p_bms << " " << bp_bms << " " << bpn << " " << cw << " " << kcc << " " << bpnimpr_basic << endl;
 
     build(file_name);
 	init_color();
-	cout << compute_score() << " init score " << endl;
-	best_score = vertex_count * vertex_count;
 
-	long big_no_impr = 0;
+	long density = edge_count / vertex_count;
+	conflict_weight = density / 3;
+	k_conflict_color = conflict_weight;
 
-	while (current_iter < max_iter)
-	{
-		//#liyan debug
-		//cout << "cycle begin" << endl;
-		//choose_conflict_node();
-		choose_conflict_node_new();
-		//cout << "cycle begin 1" << endl;
-		//decrease_node_color();
-		decrease_node_color_new();
-		//cout << "cycle begin 2" << endl;
-		remove_conflict();
-		//cout << "cycle begin 3" << endl;
-		decrease_color();
+	/*
+	choose_conflict_node_bms = c_bms;
+	pertub_bms = p_bms;
+	big_pertub_bms = bp_bms;
+	big_pertub_num_k = bpn;
+	conflict_weight = cw;
+	k_conflict_color = kcc;
+	max_no_impr_basic = bpnimpr_basic;
+	*/
+	
+	cout << "max_no_impr:" << max_no_impr << endl;
+	cout << "k_conflict_color" << k_conflict_color << endl;
+	cout << "choose_conflict_node_bms" << choose_conflict_node_bms << endl;
+	cout << "remove_conflict_bms" << remove_conflict_bms << endl;
+	cout << "pertub_bms" << pertub_bms << endl;
+	cout << "big_pertub_bms" << big_pertub_bms << endl;
+	cout << "big_pertub_num_k" << big_pertub_num_k << endl;
+	cout << "big_no_impr_basic" << max_no_impr_basic << endl;
 
-		//restore_local_opt();
-		
-		long score = 0;
-		if (edge_conflict == 0) score = compute_score();
-		if (edge_conflict == 0 && score < best_score) {
-			update_best_solution();
-			cout << "best score: " << best_score << " " << current_iter << " " << no_impr << endl;
-			no_impr = 0;
-			big_pert_num = vertex_count / 20;
-			//big_pert_num = 5;
-		}
-		if (edge_conflict == 0 && score == best_score){
-			no_impr = 0;
-		}
-		// #liyan debug
-		//cout << "best score: " << best_score << endl;
-		//cout << "score now: " << score << endl;
-		//getchar();
-		//if (no_impr > 10000000){
-		if (no_impr > 10000000){
-			big_pertub(big_pert_num);
-			//cout << "big pertub" << endl;
-			no_impr = 0;
-		}
-		perturbation();
-		//big_no_impr++;
+	localsearch_new();
+	//old_localsearch();
 
-	}
-	long ini_score = compute_score();
-	cout << "ini score:" << ini_score << endl;
-	    
     return 0;
 }
